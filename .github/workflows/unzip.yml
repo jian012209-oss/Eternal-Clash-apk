@@ -1,19 +1,70 @@
-name: Unzip project
+name: Build Eternal Clash APK
+
 on:
-  push:
-    paths: ['**.zip']
   workflow_dispatch:
+  push:
+    paths:
+      - 'EternalClash_Android*.zip'
+      - 'EternalClash/**'
+      - 'models/**'
+
 permissions:
   contents: write
+
 jobs:
-  unzip:
+  build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: |
-          for z in *.zip; do unzip -o "$z" && git rm -q "$z"; done
-          git config user.name "github-actions"
-          git config user.email "github-actions@users.noreply.github.com"
-          git add -A
-          git commit -m "Unzip project" || echo "nothing to commit"
-          git push
+
+      - name: Unpack the game
+        run: |
+          Z=$(ls EternalClash_Android*.zip 2>/dev/null | sort | tail -1)
+          if [ -n "$Z" ]; then echo "Using $Z"; rm -rf EternalClash && unzip -q -o "$Z"; fi
+          test -f EternalClash/www/index.html
+
+      - name: Add hero 3D models (optional)
+        run: |
+          if [ -d models ]; then
+            mkdir -p EternalClash/www/models
+            cp -f models/*.glb EternalClash/www/models/ 2>/dev/null || true
+            python3 - <<'PY'
+          import os, json, re
+          d = 'EternalClash/www/models'
+          heroes = {}
+          for f in sorted(os.listdir(d)):
+              if not f.lower().endswith('.glb'):
+                  continue
+              hero = re.split(r'\s+-\s+|_', f[:-4], maxsplit=1)[0].strip()
+              heroes.setdefault(hero, []).append(f)
+          out = [{'hero': h, 'files': sorted(fs, key=lambda x: (x[:-4].strip().lower() != h.lower(), x))} for h, fs in heroes.items()]
+          json.dump({'models': out}, open(os.path.join(d, 'index.json'), 'w'), indent=1)
+          print('Hero models:', json.dumps(out))
+          PY
+          fi
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Build APK
+        env:
+          VERSION_CODE: ${{ github.run_number }}
+          VERSION_NAME: 1.0.${{ github.run_number }}
+        run: gradle -p EternalClash/android assembleRelease --no-daemon --stacktrace
+
+      - name: Name the APK
+        run: cp EternalClash/android/app/build/outputs/apk/release/app-release.apk EternalClash-v1.0.${{ github.run_number }}.apk
+
+      - name: Publish the release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: Eternal Clash v1.0.${{ github.run_number }}
+          body: Android build of Eternal Clash. Download the APK below and install it on your phone.
+          files: EternalClash-v1.0.${{ github.run_number }}.apk
